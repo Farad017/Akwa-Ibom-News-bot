@@ -1,0 +1,32 @@
+name: Test Akwa Ibom News Scraper
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run news scraper
+        run: python fetch_news.py
+
+      - name: Show collected news
+        run: cat news.json
+
+      - name: Save news result
+        uses: actions/upload-artifact@v4
+        with:
+          name: akwa-ibom-news-test
+          path: news.json
