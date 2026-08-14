@@ -2,9 +2,9 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import urlparse
 
-import requests
+from ddgs import DDGS
 
 
 # ------------------------------------------------------------
@@ -13,43 +13,13 @@ import requests
 
 SEARCH_QUERY = "akwa ibom"
 
-DUCKDUCKGO_URL = (
-    "https://duckduckgo.com/news.js"
-    "?q=" + quote_plus(SEARCH_QUERY)
-    + "&o=json"
-    + "&noamp=1"
-)
-
 OUTPUT_FILE = Path("news.json")
 
+# We only want the 10 most recent stories.
 MAX_STORIES = 10
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0 Safari/537.36"
-    ),
-    "Accept": "application/json",
-}
-
-
-# ------------------------------------------------------------
-# DOWNLOAD DUCKDUCKGO NEWS
-# ------------------------------------------------------------
-
-def fetch_news():
-    print("Fetching DuckDuckGo News...")
-
-    response = requests.get(
-        DUCKDUCKGO_URL,
-        headers=HEADERS,
-        timeout=30,
-    )
-
-    response.raise_for_status()
-
-    return response.json()
+# Nigeria / English search region.
+REGION = "ng-en"
 
 
 # ------------------------------------------------------------
@@ -58,8 +28,8 @@ def fetch_news():
 
 def normalize_url(url):
     """
-    Remove tracking parameters so that the same article
-    isn't treated as different stories because of tracking URLs.
+    Remove query strings and fragments so that tracking
+    URLs don't create duplicate stories.
     """
 
     parsed = urlparse(url)
@@ -77,6 +47,7 @@ def normalize_url(url):
 # ------------------------------------------------------------
 
 def clean_title(title):
+
     if not title:
         return ""
 
@@ -86,73 +57,55 @@ def clean_title(title):
 
 
 # ------------------------------------------------------------
-# EXTRACT STORIES
+# FETCH DUCKDUCKGO NEWS
 # ------------------------------------------------------------
 
-def extract_stories(data):
+def fetch_news():
+
+    print("Searching DuckDuckGo News for:", SEARCH_QUERY)
 
     stories = []
 
-    # DuckDuckGo's response can contain the news results
-    # under different structures, so check the expected
-    # news-results locations.
-
-    possible_results = []
-
-    if isinstance(data, dict):
-
-        if isinstance(data.get("results"), list):
-            possible_results.extend(data["results"])
-
-        if isinstance(data.get("news"), list):
-            possible_results.extend(data["news"])
-
-        if isinstance(data.get("news_results"), list):
-            possible_results.extend(data["news_results"])
-
     seen_urls = set()
 
-    for item in possible_results:
+    with DDGS(timeout=20) as ddgs:
 
-        if not isinstance(item, dict):
-            continue
-
-        title = (
-            item.get("title")
-            or item.get("heading")
-            or ""
+        results = ddgs.news(
+            SEARCH_QUERY,
+            region=REGION,
+            safesearch="moderate",
+            timelimit="d",
+            max_results=MAX_STORIES * 3,
         )
 
-        url = (
-            item.get("url")
-            or item.get("link")
-            or ""
-        )
+        for item in results:
 
-        title = clean_title(title)
+            title = clean_title(
+                item.get("title", "")
+            )
 
-        if not title or not url:
-            continue
+            url = item.get("url", "")
 
-        url = normalize_url(url)
+            if not title or not url:
+                continue
 
-        if not url:
-            continue
+            url = normalize_url(url)
 
-        # Remove duplicate stories.
-        if url in seen_urls:
-            continue
+            # Remove duplicate stories.
+            if url in seen_urls:
+                continue
 
-        seen_urls.add(url)
+            seen_urls.add(url)
 
-        stories.append({
-            "title": title,
-            "url": url,
-        })
+            stories.append({
+                "title": title,
+                "url": url,
+            })
 
-        # We only need the 10 most recent results.
-        if len(stories) >= MAX_STORIES:
-            break
+            # Stop once we have the 10 newest
+            # unique stories.
+            if len(stories) >= MAX_STORIES:
+                break
 
     return stories
 
@@ -185,22 +138,25 @@ def save_results(stories):
 
 def main():
 
-    data = fetch_news()
-
-    stories = extract_stories(data)
+    stories = fetch_news()
 
     if not stories:
+
         raise RuntimeError(
-            "No news stories were found in DuckDuckGo's response."
+            "No news stories were returned by DuckDuckGo."
         )
 
     save_results(stories)
 
     print(
-        f"Successfully collected {len(stories)} news stories."
+        f"\nSuccessfully collected "
+        f"{len(stories)} unique news stories.\n"
     )
 
-    for number, story in enumerate(stories, start=1):
+    for number, story in enumerate(
+        stories,
+        start=1,
+    ):
 
         print(
             f"{number}. {story['title']}"
