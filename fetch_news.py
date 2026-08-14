@@ -16,8 +16,8 @@ SEARCH_QUERY = "akwa ibom"
 DUCKDUCKGO_URL = (
     "https://duckduckgo.com/news.js"
     "?q=" + quote_plus(SEARCH_QUERY)
-    "&o=json"
-    "&noamp=1"
+    + "&o=json"
+    + "&noamp=1"
 )
 
 OUTPUT_FILE = Path("news.json")
