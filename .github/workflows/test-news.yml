@@ -20,21 +20,21 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run news scraper
-  run: python fetch_news.py
+        run: python fetch_news.py
 
-- name: Generate RSS feed
-  run: python generate_rss.py
-
-- name: Show collected news
-  run: cat news.json
-
-- name: Show RSS feed
-  run: cat feed.xml
-
-- name: Save test results
-  uses: actions/upload-artifact@v4
-  with:
-    name: akwa-ibom-news-test
-    path: |
-      news.json
-      feed.xml
+      - name: Generate RSS feed
+        run: python generate_rss.py
+      
+      - name: Show collected news
+        run: cat news.json
+      
+      - name: Show RSS feed
+        run: cat feed.xml
+      
+      - name: Save test results
+        uses: actions/upload-artifact@v4
+        with:
+        name: akwa-ibom-news-test
+        path: |
+        news.json
+        feed.xml
