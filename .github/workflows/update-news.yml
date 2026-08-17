@@ -34,8 +34,8 @@ jobs:
       - name: Post new stories to Telegram
         run: python post_to_telegram.py
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHANNEL: ${{ secrets.TELEGRAM_CHANNEL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_AKSNEWSBOT }}
+          TELEGRAM_CHANNEL: ${{ secrets.AKWAIBOMNEWS }}
 
       - name: Commit updated news files
         run: |
