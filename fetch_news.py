@@ -1,371 +1,515 @@
 import json
 import re
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
-from difflib import SequenceMatcher
 
+import requests
+from bs4 import BeautifulSoup
 from ddgs import DDGS
 
 
-# ------------------------------------------------------------
-# SETTINGS
-# ------------------------------------------------------------
-
-SEARCH_QUERY = "akwa ibom"
-
-OUTPUT_FILE = Path("news.json")
-
-# Maximum number of stories in the final result.
+QUERY = "akwa ibom"
 MAX_STORIES = 10
+LOOKBACK_HOURS = 24
+MAX_CANDIDATES = 40
 
-# Search for news from the last day.
-TIME_LIMIT = "d"
+OUTPUT_FILE = "news.json"
 
-# Ask DuckDuckGo for more candidates than we finally need.
-# This gives us room to remove duplicates.
-CANDIDATE_STORIES = 40
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/139.0 Safari/537.36"
+    )
+}
 
-REGION = "ng-en"
+
+# Words/phrases that strongly indicate that the article is genuinely
+# about Akwa Ibom rather than merely mentioning it.
+STRONG_AKWA_IBOM_TERMS = [
+    "akwa ibom state",
+    "akwa-ibom state",
+    "akwa ibom government",
+    "akwa-ibom government",
+    "akwa ibom governor",
+    "governor umo eno",
+    "umo eno",
+    "akwa ibom house of assembly",
+    "akwa ibom state house of assembly",
+    "akwa ibom state university",
+    "akwa ibom polytechnic",
+    "university of uyo",
+    "ibom air",
+    "ibom power",
+    "victor attah international airport",
+    "uyo airport",
+    "uyo",
+    "ikot ekpene",
+    "etinan",
+    "eket",
+    "ikot abasi",
+    "oruk anam",
+    "ibaka",
+    "oron",
+    "eastern obolo",
+    "esit eket",
+    "essien udim",
+    "nsit atai",
+    "nsit ubium",
+    "mkpat enin",
+    "itu",
+    "uyo lga",
+    "ab accompanied by",  # harmless placeholder to avoid accidental empty list
+]
+
+# These are useful because some legitimate Akwa Ibom stories may refer
+# to a person/institution without using "Akwa Ibom" repeatedly.
+AKWA_IBOM_IDENTIFIERS = [
+    "ibom",
+    "uyo",
+    "a'ibom",
+    "a/ibom",
+    "a'ibom",
+]
+
+# Generic phrases that often indicate the article is actually about
+# somewhere else and only mentions Akwa Ibom incidentally.
+WEAK_CONTEXT_PHRASES = [
+    "along with other states",
+    "among other states",
+    "one of the states",
+    "other states including akwa ibom",
+    "including akwa ibom",
+    "akwa ibom was among",
+    "akwa ibom is one of",
+]
 
 
-# ------------------------------------------------------------
-# TEXT CLEANING
-# ------------------------------------------------------------
-
-def normalize_text(text):
-    """
-    Convert text to a simplified form for duplicate detection.
-    """
-
+def clean_text(text):
+    """Normalize text for easier matching."""
     if not text:
         return ""
 
-    text = text.lower()
-
-    # Remove punctuation.
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-
-    # Collapse repeated spaces.
     text = re.sub(r"\s+", " ", text)
+    return text.strip().lower()
 
-    return text.strip()
-
-
-def title_words(text):
-    """
-    Return useful words from a title.
-
-    Very common words are ignored because they don't help
-    determine whether two headlines describe the same story.
-    """
-
-    stop_words = {
-        "the", "a", "an", "and", "or", "of", "to", "in",
-        "on", "for", "with", "from", "by", "as", "at",
-        "is", "are", "was", "were", "be", "been", "this",
-        "that", "these", "those", "after", "before", "over",
-        "into", "against", "their", "his", "her", "its",
-        "new", "news"
-    }
-
-    words = normalize_text(text).split()
-
-    return {
-        word
-        for word in words
-        if word not in stop_words and len(word) > 2
-    }
-
-
-# ------------------------------------------------------------
-# DUPLICATE DETECTION
-# ------------------------------------------------------------
-
-def stories_are_duplicates(story_a, story_b):
-    """
-    Decide whether two news results appear to report
-    the same underlying story.
-
-    We use both headline similarity and snippet similarity.
-    This is deliberately conservative so unrelated stories
-    aren't accidentally removed.
-    """
-
-    title_a = normalize_text(story_a.get("title", ""))
-    title_b = normalize_text(story_b.get("title", ""))
-
-    body_a = normalize_text(story_a.get("body", ""))
-    body_b = normalize_text(story_b.get("body", ""))
-
-    if not title_a or not title_b:
-        return False
-
-    # Very similar headlines.
-    title_similarity = SequenceMatcher(
-        None,
-        title_a,
-        title_b
-    ).ratio()
-
-    # Compare meaningful words in the headlines.
-    words_a = title_words(title_a)
-    words_b = title_words(title_b)
-
-    if words_a and words_b:
-
-        shared_words = words_a.intersection(words_b)
-
-        smaller_set = min(
-            len(words_a),
-            len(words_b)
-        )
-
-        word_overlap = (
-            len(shared_words) / smaller_set
-            if smaller_set
-            else 0
-        )
-
-    else:
-        word_overlap = 0
-
-    # Compare the news snippets supplied by DuckDuckGo.
-    body_similarity = 0
-
-    if body_a and body_b:
-
-        body_similarity = SequenceMatcher(
-            None,
-            body_a,
-            body_b
-        ).ratio()
-
-    # Rule 1:
-    # Nearly identical headlines.
-    if title_similarity >= 0.78:
-        return True
-
-    # Rule 2:
-    # Different wording but most important headline words
-    # are shared.
-    if word_overlap >= 0.70 and title_similarity >= 0.50:
-        return True
-
-    # Rule 3:
-    # Headlines may differ substantially while the
-    # accompanying snippets are almost identical.
-    if body_similarity >= 0.82:
-        return True
-
-    return False
-
-
-# ------------------------------------------------------------
-# URL NORMALIZATION
-# ------------------------------------------------------------
 
 def normalize_url(url):
-
+    """Remove tracking parameters and trailing slash."""
     if not url:
         return ""
 
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
 
-    # Remove query strings and fragments, which often contain
-    # tracking parameters.
-    clean_url = parsed._replace(
-        query="",
-        fragment=""
-    ).geturl()
+        clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
-    return clean_url.rstrip("/")
+        return clean.rstrip("/")
+
+    except Exception:
+        return url
 
 
-# ------------------------------------------------------------
-# FETCH NEWS
-# ------------------------------------------------------------
+def parse_date(value):
+    """Try to convert DuckDuckGo's date into a timezone-aware datetime."""
+    if not value:
+        return None
+
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    value = str(value).strip()
+
+    # ISO format
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt.astimezone(timezone.utc)
+
+    except Exception:
+        pass
+
+    # Common date formats
+    formats = [
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S%z",
+        "%Y-%m-%d",
+    ]
+
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(value, fmt)
+
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+
+            return dt.astimezone(timezone.utc)
+
+        except Exception:
+            continue
+
+    return None
+
+
+def extract_article_text(url):
+    """
+    Download the article page and extract visible text.
+
+    If the site blocks us, return an empty string instead of failing
+    the entire scraper.
+    """
+
+    try:
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=15,
+        )
+
+        if response.status_code != 200:
+            print(
+                f"    Could not read article "
+                f"(HTTP {response.status_code})"
+            )
+            return ""
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Remove things that are not article content.
+        for tag in soup(
+            [
+                "script",
+                "style",
+                "noscript",
+                "svg",
+                "nav",
+                "footer",
+                "header",
+                "form",
+            ]
+        ):
+            tag.decompose()
+
+        # Prefer article/main content where available.
+        article = soup.find("article")
+
+        if article:
+            text = article.get_text(" ", strip=True)
+        else:
+            main = soup.find("main")
+
+            if main:
+                text = main.get_text(" ", strip=True)
+            else:
+                text = soup.get_text(" ", strip=True)
+
+        return clean_text(text)
+
+    except Exception as e:
+        print(f"    Could not read article: {e}")
+        return ""
+
+
+def relevance_score(title, description, article_text):
+    """
+    Score how strongly the article is connected to Akwa Ibom.
+
+    Higher score = stronger connection.
+    """
+
+    title_text = clean_text(title)
+    description_text = clean_text(description)
+    article_text = clean_text(article_text)
+
+    # Give the headline much more importance than a random mention
+    # somewhere deep in an article.
+    score = 0
+
+    # Strong Akwa Ibom phrase in headline.
+    for term in STRONG_AKWA_IBOM_TERMS:
+        if term in title_text:
+            score += 8
+
+    # Strong phrase in description.
+    for term in STRONG_AKWA_IBOM_TERMS:
+        if term in description_text:
+            score += 4
+
+    # Strong phrase in article body.
+    for term in STRONG_AKWA_IBOM_TERMS:
+        if term in article_text:
+            score += 2
+
+    # Generic Akwa Ibom mentions.
+    akwa_mentions = 0
+
+    for phrase in [
+        "akwa ibom",
+        "akwa-ibom",
+        "a'ibom",
+        "a/ibom",
+    ]:
+        akwa_mentions += title_text.count(phrase) * 5
+        akwa_mentions += description_text.count(phrase) * 2
+        akwa_mentions += article_text.count(phrase)
+
+    score += min(akwa_mentions, 12)
+
+    # Uyo is particularly useful because many genuinely local stories
+    # mention Uyo rather than Akwa Ibom in the headline.
+    if "uyo" in title_text:
+        score += 7
+    elif "uyo" in description_text:
+        score += 4
+    elif "uyo" in article_text:
+        score += 2
+
+    # Ibom Air is inherently Akwa Ibom-related.
+    if "ibom air" in title_text:
+        score += 10
+    elif "ibom air" in description_text:
+        score += 6
+    elif "ibom air" in article_text:
+        score += 4
+
+    # Penalize obvious "passing mention" situations.
+    for phrase in WEAK_CONTEXT_PHRASES:
+        if phrase in title_text or phrase in description_text:
+            score -= 8
+
+    return score
+
+
+def is_relevant(title, description, article_text):
+    """
+    Decide whether an article is genuinely relevant.
+
+    The threshold intentionally allows stories such as Ibom Air
+    or Uyo stories even if the exact words "Akwa Ibom" are absent
+    from the headline.
+    """
+
+    title_text = clean_text(title)
+    description_text = clean_text(description)
+    article_text = clean_text(article_text)
+
+    score = relevance_score(
+        title_text,
+        description_text,
+        article_text,
+    )
+
+    # Very strong headline connections should always qualify.
+    for term in STRONG_AKWA_IBOM_TERMS:
+        if term in title_text:
+            return True, score
+
+    # Ibom Air is specifically Akwa Ibom-related.
+    if "ibom air" in title_text or "ibom air" in description_text:
+        return True, score
+
+    # Uyo in the headline is a strong local signal.
+    if "uyo" in title_text:
+        return True, score
+
+    # Otherwise require meaningful evidence in the body.
+    if score >= 8:
+        return True, score
+
+    return False, score
+
 
 def fetch_news():
-
-    print(
-        f"Searching DuckDuckGo News for: {SEARCH_QUERY}"
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        hours=LOOKBACK_HOURS
     )
+
+    print(f"Searching DuckDuckGo News for: {QUERY}")
 
     candidates = []
 
-    with DDGS(timeout=20) as ddgs:
+    try:
+        with DDGS() as ddgs:
+            results = ddgs.news(
+                QUERY,
+                timelimit="d",
+                max_results=MAX_CANDIDATES,
+            )
 
-        results = ddgs.news(
-            SEARCH_QUERY,
-            region=REGION,
-            safesearch="moderate",
-            timelimit=TIME_LIMIT,
-            max_results=CANDIDATE_STORIES,
+            for result in results:
+                title = (result.get("title") or "").strip()
+                url = (result.get("url") or "").strip()
+                description = (
+                    result.get("body")
+                    or result.get("description")
+                    or ""
+                ).strip()
+
+                date_value = (
+                    result.get("date")
+                    or result.get("published")
+                    or result.get("published_date")
+                )
+
+                if not title or not url:
+                    continue
+
+                published = parse_date(date_value)
+
+                # If DuckDuckGo provides a date, enforce our
+                # 24-hour window.
+                if published and published < cutoff:
+                    continue
+
+                candidates.append(
+                    {
+                        "title": title,
+                        "url": normalize_url(url),
+                        "description": description,
+                        "published": (
+                            published.isoformat()
+                            if published
+                            else None
+                        ),
+                    }
+                )
+
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not retrieve DuckDuckGo News results: {e}"
         )
 
-        for item in results:
+    print(f"DuckDuckGo returned {len(candidates)} candidates.")
 
-            title = item.get("title", "")
-            url = item.get("url", "")
-            body = item.get("body", "")
-            date = item.get("date", "")
-            source = item.get("source", "")
-
-            if not title or not url:
-                continue
-
-            clean_url = normalize_url(url)
-
-            if not clean_url:
-                continue
-
-            candidates.append({
-                "title": title.strip(),
-                "url": clean_url,
-                "body": body.strip() if body else "",
-                "date": date,
-                "source": source,
-            })
-
-    print(
-        f"DuckDuckGo returned {len(candidates)} candidates."
-    )
-
-    return candidates
-
-
-# ------------------------------------------------------------
-# REMOVE DUPLICATES
-# ------------------------------------------------------------
-
-def remove_duplicates(candidates):
-
-    unique_stories = []
-
+    # Remove duplicate URLs first.
+    unique_candidates = []
     seen_urls = set()
 
-    for story in candidates:
+    for item in candidates:
+        url = item["url"]
 
-        url = story["url"]
-
-        # --------------------------------------------
-        # Exact URL duplicate
-        # --------------------------------------------
+        if not url:
+            continue
 
         if url in seen_urls:
             continue
 
         seen_urls.add(url)
+        unique_candidates.append(item)
 
-        # --------------------------------------------
-        # Same story from another publisher
-        # --------------------------------------------
+    print(
+        f"After URL deduplication: "
+        f"{len(unique_candidates)} candidates."
+    )
 
-        duplicate = False
+    qualifying = []
 
-        for existing_story in unique_stories:
+    for index, item in enumerate(unique_candidates, start=1):
 
-            if stories_are_duplicates(
-                story,
-                existing_story
-            ):
-                duplicate = True
-                break
+        print()
+        print(
+            f"Checking relevance "
+            f"{index}/{len(unique_candidates)}:"
+        )
+        print(f"  {item['title']}")
 
-        if duplicate:
-            print(
-                "Duplicate removed:"
-                f" {story['title']}"
+        article_text = extract_article_text(item["url"])
+
+        relevant, score = is_relevant(
+            item["title"],
+            item["description"],
+            article_text,
+        )
+
+        if relevant:
+            print(f"  ✓ ACCEPTED (score {score})")
+
+            qualifying.append(
+                {
+                    "title": item["title"],
+                    "url": item["url"],
+                    "published": item["published"],
+                    "score": score,
+                }
             )
+
+        else:
+            print(f"  ✗ REJECTED (score {score})")
+
+    # Remove duplicate/similar titles.
+    final_stories = []
+    seen_titles = set()
+
+    for item in qualifying:
+
+        title_key = clean_text(item["title"])
+
+        # Basic duplicate detection using important words.
+        words = [
+            word
+            for word in re.findall(r"[a-z0-9]+", title_key)
+            if len(word) > 3
+        ]
+
+        signature = " ".join(sorted(words))
+
+        if signature in seen_titles:
             continue
 
-        unique_stories.append(story)
+        seen_titles.add(signature)
 
-        # We can stop once we have the required maximum.
-        if len(unique_stories) >= MAX_STORIES:
-            break
-
-    return unique_stories
-
-
-# ------------------------------------------------------------
-# SAVE RESULTS
-# ------------------------------------------------------------
-
-def save_results(stories):
-
-    # Keep the output simple.
-    # RSS will later use only title and URL.
-
-    output = {
-        "updated": datetime.now(
-            timezone.utc
-        ).isoformat(),
-
-        "query": SEARCH_QUERY,
-
-        "stories": [
+        final_stories.append(
             {
-                "title": story["title"],
-                "url": story["url"],
+                "title": item["title"],
+                "url": item["url"],
             }
+        )
 
-            for story in stories
-        ]
-    }
-
-    OUTPUT_FILE.write_text(
-        json.dumps(
-            output,
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-
-# ------------------------------------------------------------
-# MAIN
-# ------------------------------------------------------------
-
-def main():
-
-    candidates = fetch_news()
-
-    stories = remove_duplicates(
-        candidates
-    )
-
-    save_results(stories)
+        if len(final_stories) >= MAX_STORIES:
+            break
 
     print()
     print(
-        f"Final result: {len(stories)} "
-        f"unique news stories."
+        f"Final result: "
+        f"{len(final_stories)} unique relevant news stories."
     )
+
+    for number, story in enumerate(final_stories, start=1):
+        print()
+        print(f"{number}. {story['title']}")
+        print(f"   {story['url']}")
+
+    return final_stories
+
+
+def main():
+    stories = fetch_news()
+
+    output = {
+        "updated": datetime.now(timezone.utc).isoformat(),
+        "query": QUERY,
+        "stories": stories,
+    }
+
+    with open(
+        OUTPUT_FILE,
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            output,
+            file,
+            indent=2,
+            ensure_ascii=False,
+        )
+
     print()
-
-    if not stories:
-
-        print(
-            "No qualifying news stories were found."
-        )
-
-        return
-
-    for number, story in enumerate(
-        stories,
-        start=1
-    ):
-
-        print(
-            f"{number}. {story['title']}"
-        )
-
-        print(
-            f"   {story['url']}"
-        )
+    print(f"Saved {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
