@@ -31,10 +31,16 @@ jobs:
       - name: Generate RSS feed
         run: python generate_rss.py
 
+      - name: Post new stories to Telegram
+        run: python post_to_telegram.py
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL: ${{ secrets.TELEGRAM_CHANNEL }}
+
       - name: Commit updated news files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add news.json feed.xml
+          git add news.json feed.xml posted_news.json
           git diff --cached --quiet || git commit -m "Update Akwa Ibom news RSS"
           git push
