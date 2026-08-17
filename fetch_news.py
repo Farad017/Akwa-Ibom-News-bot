@@ -24,69 +24,100 @@ HEADERS = {
 }
 
 
-# Words/phrases that strongly indicate that the article is genuinely
-# about Akwa Ibom rather than merely mentioning it.
-STRONG_AKWA_IBOM_TERMS = [
-    "akwa ibom state",
-    "akwa-ibom state",
+# Places and entities that are strongly associated with Akwa Ibom.
+# These are deliberately more specific than simply searching for
+# the words "akwa" or "ibom".
+AKWA_IBOM_TERMS = [
+    "akwa ibom",
+    "akwa-ibom",
+    "a'ibom",
+    "a/ibom",
+    "akwaibom",
+    "uyo",
+    "ibom air",
+    "ibom airport",
+    "uyo airport",
+    "ibom power",
     "akwa ibom government",
     "akwa-ibom government",
     "akwa ibom governor",
+    "akwa-ibom governor",
     "governor umo eno",
     "umo eno",
     "akwa ibom house of assembly",
     "akwa ibom state house of assembly",
     "akwa ibom state university",
-    "akwa ibom polytechnic",
     "university of uyo",
-    "ibom air",
-    "ibom power",
-    "victor attah international airport",
-    "uyo airport",
-    "uyo",
+    "akwa ibom state university teaching hospital",
+    "aksth",
+    "ibom tropical park",
+    "ibom plaza",
     "ikot ekpene",
-    "etinan",
     "eket",
-    "ikot abasi",
-    "oruk anam",
-    "ibaka",
+    "etinan",
     "oron",
+    "ikot abasi",
+    "itu",
+    "nsit ubium",
+    "nsit atai",
+    "mkpat enin",
+    "essien udim",
+    "oruk anam",
     "eastern obolo",
     "esit eket",
-    "essien udim",
-    "nsit atai",
-    "nsit ubium",
-    "mkpat enin",
-    "itu",
+    "ibiono ibom",
+    "ibiono",
+    "ini lga",
+    "isiala mbano",
+    "mbo",
+    "okobo",
+    "udung uko",
+    "urue offong/oruko",
+    "urue offong",
     "uyo lga",
-    "ab accompanied by",  # harmless placeholder to avoid accidental empty list
 ]
 
-# These are useful because some legitimate Akwa Ibom stories may refer
-# to a person/institution without using "Akwa Ibom" repeatedly.
-AKWA_IBOM_IDENTIFIERS = [
-    "ibom",
-    "uyo",
-    "a'ibom",
-    "a/ibom",
-    "a'ibom",
-]
 
-# Generic phrases that often indicate the article is actually about
-# somewhere else and only mentions Akwa Ibom incidentally.
-WEAK_CONTEXT_PHRASES = [
-    "along with other states",
-    "among other states",
-    "one of the states",
-    "other states including akwa ibom",
-    "including akwa ibom",
-    "akwa ibom was among",
-    "akwa ibom is one of",
+# Nigerian locations that should make us cautious when they dominate
+# the story. The article can still be relevant to Akwa Ibom, but a
+# story clearly about another location should not pass just because
+# Akwa Ibom appears once.
+OTHER_LOCATION_TERMS = [
+    "abuja",
+    "lagos",
+    "kano",
+    "kaduna",
+    "katsina",
+    "osun",
+    "oyo",
+    "ogun",
+    "ondo",
+    "ekiti",
+    "enugu",
+    "anambra",
+    "imo",
+    "rivers",
+    "bayelsa",
+    "delta",
+    "edo",
+    "cross river",
+    "plateau",
+    "benue",
+    "nasarawa",
+    "kwara",
+    "niger",
+    "sokoto",
+    "zamfara",
+    "jigawa",
+    "bauchi",
+    "gombe",
+    "borno",
+    "yobe",
+    "adamawa",
 ]
 
 
 def clean_text(text):
-    """Normalize text for easier matching."""
     if not text:
         return ""
 
@@ -95,23 +126,18 @@ def clean_text(text):
 
 
 def normalize_url(url):
-    """Remove tracking parameters and trailing slash."""
     if not url:
         return ""
 
     try:
         parsed = urlparse(url)
-
         clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-
         return clean.rstrip("/")
-
     except Exception:
         return url
 
 
 def parse_date(value):
-    """Try to convert DuckDuckGo's date into a timezone-aware datetime."""
     if not value:
         return None
 
@@ -122,7 +148,6 @@ def parse_date(value):
 
     value = str(value).strip()
 
-    # ISO format
     try:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
 
@@ -134,7 +159,6 @@ def parse_date(value):
     except Exception:
         pass
 
-    # Common date formats
     formats = [
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%d %H:%M:%S%z",
@@ -158,10 +182,11 @@ def parse_date(value):
 
 def extract_article_text(url):
     """
-    Download the article page and extract visible text.
+    Download the article and extract its main visible text.
 
-    If the site blocks us, return an empty string instead of failing
-    the entire scraper.
+    If a website blocks access, return an empty string. The scraper
+    will then be conservative rather than assuming the story is
+    relevant.
     """
 
     try:
@@ -180,7 +205,6 @@ def extract_article_text(url):
 
         soup = BeautifulSoup(response.text, "html.parser")
 
-        # Remove things that are not article content.
         for tag in soup(
             [
                 "script",
@@ -195,7 +219,6 @@ def extract_article_text(url):
         ):
             tag.decompose()
 
-        # Prefer article/main content where available.
         article = soup.find("article")
 
         if article:
@@ -215,110 +238,246 @@ def extract_article_text(url):
         return ""
 
 
-def relevance_score(title, description, article_text):
+def count_terms(text, terms):
+    count = 0
+
+    for term in terms:
+        count += text.count(term)
+
+    return count
+
+
+def has_strong_headline_connection(title):
     """
-    Score how strongly the article is connected to Akwa Ibom.
+    Headline-level connection is the strongest signal.
 
-    Higher score = stronger connection.
+    This allows legitimate stories such as:
+    - Uyo flooding
+    - Ibom Air expansion
+    - Akwa Ibom police operations
+    - Governor Eno announcements
     """
 
-    title_text = clean_text(title)
-    description_text = clean_text(description)
-    article_text = clean_text(article_text)
+    title = clean_text(title)
 
-    # Give the headline much more importance than a random mention
-    # somewhere deep in an article.
-    score = 0
-
-    # Strong Akwa Ibom phrase in headline.
-    for term in STRONG_AKWA_IBOM_TERMS:
-        if term in title_text:
-            score += 8
-
-    # Strong phrase in description.
-    for term in STRONG_AKWA_IBOM_TERMS:
-        if term in description_text:
-            score += 4
-
-    # Strong phrase in article body.
-    for term in STRONG_AKWA_IBOM_TERMS:
-        if term in article_text:
-            score += 2
-
-    # Generic Akwa Ibom mentions.
-    akwa_mentions = 0
-
-    for phrase in [
+    strong_headline_terms = [
         "akwa ibom",
         "akwa-ibom",
         "a'ibom",
         "a/ibom",
-    ]:
-        akwa_mentions += title_text.count(phrase) * 5
-        akwa_mentions += description_text.count(phrase) * 2
-        akwa_mentions += article_text.count(phrase)
+        "akwaibom",
+        "uyo",
+        "ibom air",
+        "ibom airport",
+        "uyo airport",
+        "ibom power",
+        "governor umo eno",
+        "umo eno",
+        "akwa ibom government",
+        "akwa-ibom government",
+        "akwa ibom governor",
+        "akwa-ibom governor",
+        "akwa ibom house of assembly",
+        "akwa ibom state university",
+        "university of uyo",
+        "ikot ekpene",
+        "eket",
+        "etinan",
+        "oron",
+        "ikot abasi",
+        "itu",
+        "nsit ubium",
+        "nsit atai",
+        "mkpat enin",
+        "essien udim",
+        "oruk anam",
+        "eastern obolo",
+        "esit eket",
+        "ibiono ibom",
+        "okobo",
+        "mbo",
+        "udung uko",
+    ]
 
-    score += min(akwa_mentions, 12)
+    return any(term in title for term in strong_headline_terms)
 
-    # Uyo is particularly useful because many genuinely local stories
-    # mention Uyo rather than Akwa Ibom in the headline.
-    if "uyo" in title_text:
-        score += 7
-    elif "uyo" in description_text:
-        score += 4
-    elif "uyo" in article_text:
-        score += 2
 
-    # Ibom Air is inherently Akwa Ibom-related.
-    if "ibom air" in title_text:
+def relevance_score(title, description, article_text):
+    """
+    Calculate a conservative relevance score.
+
+    Headline = strongest evidence.
+    Description = medium evidence.
+    Body = supporting evidence.
+
+    A single incidental mention of Akwa Ibom should not be enough.
+    """
+
+    title = clean_text(title)
+    description = clean_text(description)
+    article_text = clean_text(article_text)
+
+    score = 0
+
+    headline_hits = count_terms(title, AKWA_IBOM_TERMS)
+    description_hits = count_terms(description, AKWA_IBOM_TERMS)
+    body_hits = count_terms(article_text, AKWA_IBOM_TERMS)
+
+    # Headline evidence is very strong.
+    score += headline_hits * 12
+
+    # Search-result description is useful but less reliable.
+    score += min(description_hits * 4, 12)
+
+    # Body evidence is supporting evidence only.
+    score += min(body_hits * 2, 14)
+
+    # Specific entities receive additional weight.
+    if "ibom air" in title:
         score += 10
-    elif "ibom air" in description_text:
-        score += 6
-    elif "ibom air" in article_text:
-        score += 4
 
-    # Penalize obvious "passing mention" situations.
-    for phrase in WEAK_CONTEXT_PHRASES:
-        if phrase in title_text or phrase in description_text:
-            score -= 8
+    if "ibom air" in description:
+        score += 5
+
+    if "ibom air" in article_text:
+        score += 3
+
+    if "governor umo eno" in title or "umo eno" in title:
+        score += 8
+
+    if "akwa ibom government" in title:
+        score += 8
+
+    # If the headline contains another Nigerian location and does
+    # not contain an Akwa-Ibom signal, apply a strong penalty.
+    other_locations_in_title = count_terms(
+        title,
+        OTHER_LOCATION_TERMS,
+    )
+
+    if other_locations_in_title > 0 and headline_hits == 0:
+        score -= 15
+
+    # If another location dominates the article and Akwa Ibom is
+    # mentioned only a few times, apply another penalty.
+    other_location_mentions = count_terms(
+        article_text,
+        OTHER_LOCATION_TERMS,
+    )
+
+    akwa_mentions = count_terms(
+        article_text,
+        [
+            "akwa ibom",
+            "akwa-ibom",
+            "a'ibom",
+            "a/ibom",
+            "ibom air",
+        ],
+    )
+
+    if (
+        other_location_mentions >= 5
+        and akwa_mentions <= 2
+        and headline_hits == 0
+    ):
+        score -= 15
 
     return score
 
 
 def is_relevant(title, description, article_text):
     """
-    Decide whether an article is genuinely relevant.
+    Conservative relevance decision.
 
-    The threshold intentionally allows stories such as Ibom Air
-    or Uyo stories even if the exact words "Akwa Ibom" are absent
-    from the headline.
+    We intentionally prefer publishing fewer genuine stories rather
+    than filling the feed with loosely related stories.
     """
 
-    title_text = clean_text(title)
-    description_text = clean_text(description)
+    title = clean_text(title)
+    description = clean_text(description)
     article_text = clean_text(article_text)
 
+    # If the headline itself clearly identifies Akwa Ibom/Uyo/etc.,
+    # accept it.
+    if has_strong_headline_connection(title):
+        score = relevance_score(
+            title,
+            description,
+            article_text,
+        )
+        return True, score
+
+    # Without a strong headline connection, we need the article body
+    # to provide meaningful evidence.
+    if not article_text:
+        score = relevance_score(
+            title,
+            description,
+            article_text,
+        )
+        return False, score
+
     score = relevance_score(
-        title_text,
-        description_text,
+        title,
+        description,
         article_text,
     )
 
-    # Very strong headline connections should always qualify.
-    for term in STRONG_AKWA_IBOM_TERMS:
-        if term in title_text:
-            return True, score
+    # Require stronger evidence when Akwa Ibom is NOT in the headline.
+    #
+    # This prevents articles about Abuja, Osun, Katsina, etc. from
+    # slipping through because they happen to mention Akwa Ibom.
+    akwa_body_mentions = count_terms(
+        article_text,
+        [
+            "akwa ibom",
+            "akwa-ibom",
+            "a'ibom",
+            "a/ibom",
+            "ibom air",
+        ],
+    )
 
-    # Ibom Air is specifically Akwa Ibom-related.
-    if "ibom air" in title_text or "ibom air" in description_text:
+    strong_entity_mentions = count_terms(
+        article_text,
+        [
+            "ibom air",
+            "akwa ibom government",
+            "governor umo eno",
+            "umo eno",
+            "university of uyo",
+            "akwa ibom house of assembly",
+        ],
+    )
+
+    # Strong direct connection.
+    if strong_entity_mentions >= 2 and score >= 8:
         return True, score
 
-    # Uyo in the headline is a strong local signal.
-    if "uyo" in title_text:
+    # Several independent Akwa-Ibom references.
+    if akwa_body_mentions >= 4 and score >= 10:
         return True, score
 
-    # Otherwise require meaningful evidence in the body.
-    if score >= 8:
+    # Uyo/local-government connection can qualify if it is repeated
+    # meaningfully in the article.
+    local_place_mentions = count_terms(
+        article_text,
+        [
+            "uyo",
+            "etinan",
+            "eket",
+            "oron",
+            "ikot ekpene",
+            "ikot abasi",
+        ],
+    )
+
+    if (
+        local_place_mentions >= 3
+        and akwa_body_mentions >= 2
+        and score >= 10
+    ):
         return True, score
 
     return False, score
@@ -344,6 +503,7 @@ def fetch_news():
             for result in results:
                 title = (result.get("title") or "").strip()
                 url = (result.get("url") or "").strip()
+
                 description = (
                     result.get("body")
                     or result.get("description")
@@ -361,8 +521,6 @@ def fetch_news():
 
                 published = parse_date(date_value)
 
-                # If DuckDuckGo provides a date, enforce our
-                # 24-hour window.
                 if published and published < cutoff:
                     continue
 
@@ -386,7 +544,7 @@ def fetch_news():
 
     print(f"DuckDuckGo returned {len(candidates)} candidates.")
 
-    # Remove duplicate URLs first.
+    # URL deduplication.
     unique_candidates = []
     seen_urls = set()
 
@@ -409,16 +567,22 @@ def fetch_news():
 
     qualifying = []
 
-    for index, item in enumerate(unique_candidates, start=1):
+    for index, item in enumerate(
+        unique_candidates,
+        start=1,
+    ):
 
         print()
         print(
             f"Checking relevance "
             f"{index}/{len(unique_candidates)}:"
         )
+
         print(f"  {item['title']}")
 
-        article_text = extract_article_text(item["url"])
+        article_text = extract_article_text(
+            item["url"]
+        )
 
         relevant, score = is_relevant(
             item["title"],
@@ -427,7 +591,10 @@ def fetch_news():
         )
 
         if relevant:
-            print(f"  ✓ ACCEPTED (score {score})")
+            print(
+                f"  ✓ ACCEPTED "
+                f"(score {score})"
+            )
 
             qualifying.append(
                 {
@@ -439,29 +606,38 @@ def fetch_news():
             )
 
         else:
-            print(f"  ✗ REJECTED (score {score})")
+            print(
+                f"  ✗ REJECTED "
+                f"(score {score})"
+            )
 
-    # Remove duplicate/similar titles.
+    # Title deduplication.
     final_stories = []
-    seen_titles = set()
+    seen_signatures = set()
 
     for item in qualifying:
 
-        title_key = clean_text(item["title"])
+        title_key = clean_text(
+            item["title"]
+        )
 
-        # Basic duplicate detection using important words.
         words = [
             word
-            for word in re.findall(r"[a-z0-9]+", title_key)
+            for word in re.findall(
+                r"[a-z0-9]+",
+                title_key,
+            )
             if len(word) > 3
         ]
 
-        signature = " ".join(sorted(words))
+        signature = " ".join(
+            sorted(words)
+        )
 
-        if signature in seen_titles:
+        if signature in seen_signatures:
             continue
 
-        seen_titles.add(signature)
+        seen_signatures.add(signature)
 
         final_stories.append(
             {
@@ -470,19 +646,29 @@ def fetch_news():
             }
         )
 
+        # Maximum 10 stories.
         if len(final_stories) >= MAX_STORIES:
             break
 
     print()
     print(
         f"Final result: "
-        f"{len(final_stories)} unique relevant news stories."
+        f"{len(final_stories)} "
+        f"unique relevant news stories."
     )
 
-    for number, story in enumerate(final_stories, start=1):
+    for number, story in enumerate(
+        final_stories,
+        start=1,
+    ):
         print()
-        print(f"{number}. {story['title']}")
-        print(f"   {story['url']}")
+        print(
+            f"{number}. "
+            f"{story['title']}"
+        )
+        print(
+            f"   {story['url']}"
+        )
 
     return final_stories
 
@@ -491,7 +677,9 @@ def main():
     stories = fetch_news()
 
     output = {
-        "updated": datetime.now(timezone.utc).isoformat(),
+        "updated": datetime.now(
+            timezone.utc
+        ).isoformat(),
         "query": QUERY,
         "stories": stories,
     }
@@ -501,6 +689,7 @@ def main():
         "w",
         encoding="utf-8",
     ) as file:
+
         json.dump(
             output,
             file,
@@ -509,7 +698,9 @@ def main():
         )
 
     print()
-    print(f"Saved {OUTPUT_FILE}")
+    print(
+        f"Saved {OUTPUT_FILE}"
+    )
 
 
 if __name__ == "__main__":
