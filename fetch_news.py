@@ -1,6 +1,7 @@
 import json
 import re
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from urllib.parse import urlparse
 
 import requests
@@ -15,6 +16,10 @@ MAX_CANDIDATES = 40
 
 OUTPUT_FILE = "news.json"
 
+# Two headlines with a similarity of 0.75 or more are considered
+# likely to be reporting the same story.
+DUPLICATE_SIMILARITY = 0.75
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -24,9 +29,7 @@ HEADERS = {
 }
 
 
-# Places and entities that are strongly associated with Akwa Ibom.
-# These are deliberately more specific than simply searching for
-# the words "akwa" or "ibom".
+# Strong Akwa Ibom-related terms.
 AKWA_IBOM_TERMS = [
     "akwa ibom",
     "akwa-ibom",
@@ -50,8 +53,6 @@ AKWA_IBOM_TERMS = [
     "university of uyo",
     "akwa ibom state university teaching hospital",
     "aksth",
-    "ibom tropical park",
-    "ibom plaza",
     "ikot ekpene",
     "eket",
     "etinan",
@@ -67,21 +68,16 @@ AKWA_IBOM_TERMS = [
     "esit eket",
     "ibiono ibom",
     "ibiono",
-    "ini lga",
-    "isiala mbano",
-    "mbo",
     "okobo",
+    "mbo",
     "udung uko",
-    "urue offong/oruko",
     "urue offong",
     "uyo lga",
 ]
 
 
-# Nigerian locations that should make us cautious when they dominate
-# the story. The article can still be relevant to Akwa Ibom, but a
-# story clearly about another location should not pass just because
-# Akwa Ibom appears once.
+# Other Nigerian locations. These help us reject stories that are
+# primarily about another part of Nigeria.
 OTHER_LOCATION_TERMS = [
     "abuja",
     "lagos",
@@ -131,10 +127,84 @@ def normalize_url(url):
 
     try:
         parsed = urlparse(url)
+
         clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
         return clean.rstrip("/")
+
     except Exception:
         return url
+
+
+def normalize_title(title):
+    """
+    Normalize a headline so that punctuation, capitalization and
+    common filler words don't interfere with duplicate detection.
+    """
+
+    title = clean_text(title)
+
+    # Remove punctuation.
+    title = re.sub(r"[^a-z0-9\s]", " ", title)
+
+    # Common words that add little value when comparing headlines.
+    stop_words = {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "of",
+        "to",
+        "in",
+        "on",
+        "for",
+        "with",
+        "as",
+        "at",
+        "by",
+        "from",
+        "is",
+        "are",
+        "was",
+        "were",
+        "has",
+        "have",
+        "had",
+        "its",
+        "this",
+        "that",
+        "after",
+        "over",
+        "into",
+        "says",
+        "say",
+        "report",
+        "reports",
+        "news",
+    }
+
+    words = [
+        word
+        for word in title.split()
+        if word not in stop_words
+    ]
+
+    return " ".join(words)
+
+
+def title_similarity(title1, title2):
+    """
+    Compare two normalized headlines.
+    """
+
+    a = normalize_title(title1)
+    b = normalize_title(title2)
+
+    if not a or not b:
+        return 0.0
+
+    return SequenceMatcher(None, a, b).ratio()
 
 
 def parse_date(value):
@@ -144,12 +214,15 @@ def parse_date(value):
     if isinstance(value, datetime):
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
+
         return value.astimezone(timezone.utc)
 
     value = str(value).strip()
 
     try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(
+            value.replace("Z", "+00:00")
+        )
 
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
@@ -182,11 +255,9 @@ def parse_date(value):
 
 def extract_article_text(url):
     """
-    Download the article and extract its main visible text.
+    Download article text.
 
-    If a website blocks access, return an empty string. The scraper
-    will then be conservative rather than assuming the story is
-    relevant.
+    If the website blocks access, return an empty string.
     """
 
     try:
@@ -203,8 +274,12 @@ def extract_article_text(url):
             )
             return ""
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser",
+        )
 
+        # Remove non-content elements.
         for tag in soup(
             [
                 "script",
@@ -222,19 +297,30 @@ def extract_article_text(url):
         article = soup.find("article")
 
         if article:
-            text = article.get_text(" ", strip=True)
+            text = article.get_text(
+                " ",
+                strip=True,
+            )
         else:
             main = soup.find("main")
 
             if main:
-                text = main.get_text(" ", strip=True)
+                text = main.get_text(
+                    " ",
+                    strip=True,
+                )
             else:
-                text = soup.get_text(" ", strip=True)
+                text = soup.get_text(
+                    " ",
+                    strip=True,
+                )
 
         return clean_text(text)
 
     except Exception as e:
-        print(f"    Could not read article: {e}")
+        print(
+            f"    Could not read article: {e}"
+        )
         return ""
 
 
@@ -249,13 +335,8 @@ def count_terms(text, terms):
 
 def has_strong_headline_connection(title):
     """
-    Headline-level connection is the strongest signal.
-
-    This allows legitimate stories such as:
-    - Uyo flooding
-    - Ibom Air expansion
-    - Akwa Ibom police operations
-    - Governor Eno announcements
+    Determine whether the headline itself clearly identifies
+    Akwa Ibom or a strongly associated local entity.
     """
 
     title = clean_text(title)
@@ -299,18 +380,19 @@ def has_strong_headline_connection(title):
         "udung uko",
     ]
 
-    return any(term in title for term in strong_headline_terms)
+    return any(
+        term in title
+        for term in strong_headline_terms
+    )
 
 
-def relevance_score(title, description, article_text):
+def relevance_score(
+    title,
+    description,
+    article_text,
+):
     """
     Calculate a conservative relevance score.
-
-    Headline = strongest evidence.
-    Description = medium evidence.
-    Body = supporting evidence.
-
-    A single incidental mention of Akwa Ibom should not be enough.
     """
 
     title = clean_text(title)
@@ -319,20 +401,37 @@ def relevance_score(title, description, article_text):
 
     score = 0
 
-    headline_hits = count_terms(title, AKWA_IBOM_TERMS)
-    description_hits = count_terms(description, AKWA_IBOM_TERMS)
-    body_hits = count_terms(article_text, AKWA_IBOM_TERMS)
+    headline_hits = count_terms(
+        title,
+        AKWA_IBOM_TERMS,
+    )
 
-    # Headline evidence is very strong.
+    description_hits = count_terms(
+        description,
+        AKWA_IBOM_TERMS,
+    )
+
+    body_hits = count_terms(
+        article_text,
+        AKWA_IBOM_TERMS,
+    )
+
+    # Headline evidence is strongest.
     score += headline_hits * 12
 
-    # Search-result description is useful but less reliable.
-    score += min(description_hits * 4, 12)
+    # Search result description is secondary evidence.
+    score += min(
+        description_hits * 4,
+        12,
+    )
 
-    # Body evidence is supporting evidence only.
-    score += min(body_hits * 2, 14)
+    # Body evidence supports the connection.
+    score += min(
+        body_hits * 2,
+        14,
+    )
 
-    # Specific entities receive additional weight.
+    # Specific entities get extra weight.
     if "ibom air" in title:
         score += 10
 
@@ -342,24 +441,28 @@ def relevance_score(title, description, article_text):
     if "ibom air" in article_text:
         score += 3
 
-    if "governor umo eno" in title or "umo eno" in title:
+    if (
+        "governor umo eno" in title
+        or "umo eno" in title
+    ):
         score += 8
 
     if "akwa ibom government" in title:
         score += 8
 
-    # If the headline contains another Nigerian location and does
-    # not contain an Akwa-Ibom signal, apply a strong penalty.
+    # Penalize headlines clearly about another Nigerian location.
     other_locations_in_title = count_terms(
         title,
         OTHER_LOCATION_TERMS,
     )
 
-    if other_locations_in_title > 0 and headline_hits == 0:
+    if (
+        other_locations_in_title > 0
+        and headline_hits == 0
+    ):
         score -= 15
 
-    # If another location dominates the article and Akwa Ibom is
-    # mentioned only a few times, apply another penalty.
+    # Penalize articles dominated by another location.
     other_location_mentions = count_terms(
         article_text,
         OTHER_LOCATION_TERMS,
@@ -386,36 +489,43 @@ def relevance_score(title, description, article_text):
     return score
 
 
-def is_relevant(title, description, article_text):
+def is_relevant(
+    title,
+    description,
+    article_text,
+):
     """
     Conservative relevance decision.
 
-    We intentionally prefer publishing fewer genuine stories rather
-    than filling the feed with loosely related stories.
+    Fewer genuine stories are preferable to filling the feed
+    with unrelated stories.
     """
 
     title = clean_text(title)
     description = clean_text(description)
     article_text = clean_text(article_text)
 
-    # If the headline itself clearly identifies Akwa Ibom/Uyo/etc.,
-    # accept it.
+    # A strong headline connection is enough.
     if has_strong_headline_connection(title):
+
         score = relevance_score(
             title,
             description,
             article_text,
         )
+
         return True, score
 
-    # Without a strong headline connection, we need the article body
-    # to provide meaningful evidence.
+    # Without article text, we cannot confidently establish
+    # relevance.
     if not article_text:
+
         score = relevance_score(
             title,
             description,
             article_text,
         )
+
         return False, score
 
     score = relevance_score(
@@ -424,10 +534,6 @@ def is_relevant(title, description, article_text):
         article_text,
     )
 
-    # Require stronger evidence when Akwa Ibom is NOT in the headline.
-    #
-    # This prevents articles about Abuja, Osun, Katsina, etc. from
-    # slipping through because they happen to mention Akwa Ibom.
     akwa_body_mentions = count_terms(
         article_text,
         [
@@ -452,15 +558,21 @@ def is_relevant(title, description, article_text):
     )
 
     # Strong direct connection.
-    if strong_entity_mentions >= 2 and score >= 8:
+    if (
+        strong_entity_mentions >= 2
+        and score >= 8
+    ):
         return True, score
 
-    # Several independent Akwa-Ibom references.
-    if akwa_body_mentions >= 4 and score >= 10:
+    # Several direct Akwa Ibom references.
+    if (
+        akwa_body_mentions >= 4
+        and score >= 10
+    ):
         return True, score
 
-    # Uyo/local-government connection can qualify if it is repeated
-    # meaningfully in the article.
+    # Several references to an Akwa Ibom locality plus
+    # explicit Akwa Ibom references.
     local_place_mentions = count_terms(
         article_text,
         [
@@ -484,16 +596,20 @@ def is_relevant(title, description, article_text):
 
 
 def fetch_news():
-    cutoff = datetime.now(timezone.utc) - timedelta(
-        hours=LOOKBACK_HOURS
+    cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(hours=LOOKBACK_HOURS)
     )
 
-    print(f"Searching DuckDuckGo News for: {QUERY}")
+    print(
+        f"Searching DuckDuckGo News for: {QUERY}"
+    )
 
     candidates = []
 
     try:
         with DDGS() as ddgs:
+
             results = ddgs.news(
                 QUERY,
                 timelimit="d",
@@ -501,8 +617,16 @@ def fetch_news():
             )
 
             for result in results:
-                title = (result.get("title") or "").strip()
-                url = (result.get("url") or "").strip()
+
+                title = (
+                    result.get("title")
+                    or ""
+                ).strip()
+
+                url = (
+                    result.get("url")
+                    or ""
+                ).strip()
 
                 description = (
                     result.get("body")
@@ -519,9 +643,14 @@ def fetch_news():
                 if not title or not url:
                     continue
 
-                published = parse_date(date_value)
+                published = parse_date(
+                    date_value
+                )
 
-                if published and published < cutoff:
+                if (
+                    published
+                    and published < cutoff
+                ):
                     continue
 
                 candidates.append(
@@ -539,16 +668,25 @@ def fetch_news():
 
     except Exception as e:
         raise RuntimeError(
-            f"Could not retrieve DuckDuckGo News results: {e}"
+            "Could not retrieve DuckDuckGo "
+            f"News results: {e}"
         )
 
-    print(f"DuckDuckGo returned {len(candidates)} candidates.")
+    print(
+        f"DuckDuckGo returned "
+        f"{len(candidates)} candidates."
+    )
 
-    # URL deduplication.
+    # ---------------------------------------------------------
+    # STEP 1: Remove exact duplicate URLs.
+    # ---------------------------------------------------------
+
     unique_candidates = []
+
     seen_urls = set()
 
     for item in candidates:
+
         url = item["url"]
 
         if not url:
@@ -558,12 +696,17 @@ def fetch_news():
             continue
 
         seen_urls.add(url)
+
         unique_candidates.append(item)
 
     print(
         f"After URL deduplication: "
         f"{len(unique_candidates)} candidates."
     )
+
+    # ---------------------------------------------------------
+    # STEP 2: Relevance filtering.
+    # ---------------------------------------------------------
 
     qualifying = []
 
@@ -573,12 +716,16 @@ def fetch_news():
     ):
 
         print()
+
         print(
             f"Checking relevance "
-            f"{index}/{len(unique_candidates)}:"
+            f"{index}/"
+            f"{len(unique_candidates)}:"
         )
 
-        print(f"  {item['title']}")
+        print(
+            f"  {item['title']}"
+        )
 
         article_text = extract_article_text(
             item["url"]
@@ -591,6 +738,7 @@ def fetch_news():
         )
 
         if relevant:
+
             print(
                 f"  ✓ ACCEPTED "
                 f"(score {score})"
@@ -600,44 +748,79 @@ def fetch_news():
                 {
                     "title": item["title"],
                     "url": item["url"],
-                    "published": item["published"],
+                    "published": item[
+                        "published"
+                    ],
                     "score": score,
                 }
             )
 
         else:
+
             print(
                 f"  ✗ REJECTED "
                 f"(score {score})"
             )
 
-    # Title deduplication.
-    final_stories = []
-    seen_signatures = set()
+    # ---------------------------------------------------------
+    # STEP 3: Remove duplicate stories from different websites.
+    # ---------------------------------------------------------
+
+    print()
+    print(
+        "Checking for duplicate stories "
+        "across different news sources..."
+    )
+
+    unique_stories = []
 
     for item in qualifying:
 
-        title_key = clean_text(
-            item["title"]
-        )
+        duplicate_found = False
 
-        words = [
-            word
-            for word in re.findall(
-                r"[a-z0-9]+",
-                title_key,
+        for existing in unique_stories:
+
+            similarity = title_similarity(
+                item["title"],
+                existing["title"],
             )
-            if len(word) > 3
-        ]
 
-        signature = " ".join(
-            sorted(words)
-        )
+            if similarity >= DUPLICATE_SIMILARITY:
 
-        if signature in seen_signatures:
-            continue
+                print()
+                print(
+                    "  Duplicate story removed:"
+                )
 
-        seen_signatures.add(signature)
+                print(
+                    f"    {item['title']}"
+                )
+
+                print(
+                    f"    Similar to: "
+                    f"{existing['title']}"
+                )
+
+                print(
+                    f"    Similarity: "
+                    f"{similarity:.2f}"
+                )
+
+                duplicate_found = True
+
+                break
+
+        if not duplicate_found:
+
+            unique_stories.append(item)
+
+    # ---------------------------------------------------------
+    # STEP 4: Maximum of 10 stories.
+    # ---------------------------------------------------------
+
+    final_stories = []
+
+    for item in unique_stories:
 
         final_stories.append(
             {
@@ -646,11 +829,11 @@ def fetch_news():
             }
         )
 
-        # Maximum 10 stories.
         if len(final_stories) >= MAX_STORIES:
             break
 
     print()
+
     print(
         f"Final result: "
         f"{len(final_stories)} "
@@ -661,11 +844,14 @@ def fetch_news():
         final_stories,
         start=1,
     ):
+
         print()
+
         print(
             f"{number}. "
             f"{story['title']}"
         )
+
         print(
             f"   {story['url']}"
         )
@@ -674,6 +860,7 @@ def fetch_news():
 
 
 def main():
+
     stories = fetch_news()
 
     output = {
@@ -698,6 +885,7 @@ def main():
         )
 
     print()
+
     print(
         f"Saved {OUTPUT_FILE}"
     )
