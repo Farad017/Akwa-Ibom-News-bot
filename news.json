@@ -1,5 +1,26 @@
 {
-  "updated": "2026-10-09T12:47:16.700453+00:00",
+  "updated": "2026-10-09T22:23:45.274713+00:00",
   "query": "akwa ibom",
-  "stories": []
+  "stories": [
+    {
+      "title": "A'Ibom: LG chairman reconnects 6 communities to national grid",
+      "url": "https://nannews.ng/aibom-lg-chairman-reconnects-6-communities-to-national-grid"
+    },
+    {
+      "title": "How Eno's CNG initiatives provoked gas production in Akwa Ibom",
+      "url": "https://businessday.ng/news/article/how-enos-cng-initiatives-provoked-gas-production-in-akwa-ibom"
+    },
+    {
+      "title": "ICPC Urges UNIUYO To Strengthen Anti-Corruption Measures",
+      "url": "https://leadership.ng/icpc-urges-uniuyo-to-strengthen-anti-corruption-measures"
+    },
+    {
+      "title": "Court kicks out Eno's aide from property over 11 years rent payment failure",
+      "url": "https://dailypost.ng/2026/10/09/court-kicks-out-enos-aide-from-property-over-11-years-rent-payment-failure"
+    },
+    {
+      "title": "Gunmen Storm Cocoa Research Institute in Ibadan, Kidnap Three Workers",
+      "url": "https://politicsnigeria.com/2026/10/09/gunmen-storm-cocoa-research-institute-in-ibadan-kidnap-three-workers"
+    }
+  ]
 }
